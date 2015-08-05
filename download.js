@@ -10,6 +10,48 @@ var minified = true;
 
 var dependencies = {};
 
+var treeURL = 'https://api.github.com/repos/PrismJS/prism/git/trees/gh-pages?recursive=1';
+var treePromise = new Promise(function(resolve) {
+	$u.xhr({
+		url: treeURL,
+		callback: function(xhr) {
+			if (xhr.status < 400) {
+				resolve(JSON.parse(xhr.responseText).tree);
+			}
+		}
+	});
+});
+
+var qstr = window.location.search.match(/(?:languages|plugins)=[-+\w]+|themes=[-\w]+/g);
+if (qstr) {
+	qstr.forEach(function(str) {
+		var kv = str.split('=', 2),
+		    category = kv[0],
+		    ids = kv[1].split('+');
+		if (category !== 'meta' && category !== 'core' && components[category]) {
+			for (var id in components[category]) {
+				if (components[category][id].option) {
+					delete components[category][id].option;
+				}
+			}
+			ids.forEach(function(id) {
+				if (id !== 'meta') {
+					if (components[category][id]) {
+						var requireId = id;
+						while (requireId && components[category][requireId] && components[category][requireId].option !== 'default') {
+							if (typeof components[category][requireId] === 'string') {
+								components[category][requireId] = { title: components[category][requireId] }
+							}
+							components[category][requireId].option = 'default';
+							requireId = components[category][requireId].require;
+						}
+					}
+				}
+			});
+		}
+	});
+}
+
 for (var category in components) {
 	var all = components[category];
 	
@@ -37,12 +79,14 @@ for (var category in components) {
 		}
 		
 		var filepath = all.meta.path.replace(/\{id}/g, id);
-		
+
 		var info = all[id] = {
 			title: all[id].title || all[id],
-			hasCSS: all[id].hasCSS !== undefined? all[id].hasCSS : all.meta.hasCSS,
+			noCSS: all[id].noCSS || all.meta.noCSS,
+			noJS: all[id].noJS || all.meta.noJS,
 			enabled: checked,
-			require: all[id].require,
+			require: $u.type(all[id].require) === 'string' ? [all[id].require] : all[id].require,
+			owner: all[id].owner,
 			files: {
 				minified: {
 					paths: [],
@@ -56,15 +100,18 @@ for (var category in components) {
 		};
 		
 		if (info.require) {
-			dependencies[info.require] = (dependencies[info.require] || []).concat(id);
+			info.require.forEach(function (v) {
+				dependencies[v] = (dependencies[v] || []).concat(id);
+			});
 		}
-		
-		if (!/\.css$/.test(filepath)) {
+
+		if (!all[id].noJS && !/\.css$/.test(filepath)) {
 			info.files.minified.paths.push(filepath.replace(/(\.js)?$/, '.min.js'));
 			info.files.dev.paths.push(filepath.replace(/(\.js)?$/, '.js'));
 		}
 		
-		if ((all[id].hasCSS && !/\.js$/.test(filepath)) || /\.css$/.test(filepath)) {
+
+		if ((!all[id].noCSS && !/\.js$/.test(filepath)) || /\.css$/.test(filepath)) {
 			var cssFile = filepath.replace(/(\.css)?$/, '.css');
 			
 			info.files.minified.paths.push(cssFile);
@@ -91,10 +138,12 @@ for (var category in components) {
 								});
 
 								if (all[id].require && this.checked) {
-									var input = $('label[data-id="' + all[id].require + '"] > input');
-									input.checked = true;
-									
-									input.onclick();
+									all[id].require.forEach(function(v) {
+										var input = $('label[data-id="' + v + '"] > input');
+										input.checked = true;
+
+										input.onclick();
+									});
 								}
 
 								if (dependencies[id] && !this.checked) { // It’s required by others
@@ -118,7 +167,15 @@ for (var category in components) {
 					},
 					contents: info.title
 				} : info.title,
-				' ',
+				all[id].owner? {
+					tag: 'a',
+					properties: {
+						href: 'http://github.com/' + all[id].owner,
+						className: 'owner',
+						target: '_blank'
+					},
+					contents: all[id].owner
+				} : ' ',
 				{
 					tag: 'strong',
 					className: 'filesize'
@@ -133,10 +190,20 @@ form.elements.compression[0].onclick =
 form.elements.compression[1].onclick = function() {
 	minified = !!+this.value;
 	
-	fetchFiles();
+	getFilesSizes();
+};
+
+function getFileSize(filepath) {
+	return treePromise.then(function(tree) {
+		for(var i=0, l=tree.length; i<l; i++) {
+			if(tree[i].path === filepath) {
+				return tree[i].size;
+			}
+		}
+	});
 }
 
-function fetchFiles() {
+function getFilesSizes() {
 	for (var category in components) {
 		var all = components[category];
 		
@@ -151,26 +218,18 @@ function fetchFiles() {
 			files.forEach(function (filepath) {
 				var file = cache[filepath] = cache[filepath] || {};
 				
-				if (!file.contents) {
-	
-					(function(category, id, file, filepath, distro){
-	
-					$u.xhr({
-						url: filepath,
-						callback: function(xhr) {
-							if (xhr.status < 400) {
-								
-								file.contents = xhr.responseText;
-								
-								file.size = +xhr.getResponseHeader('Content-Length') || file.contents.length;
-	
-								distro.size += file.size;
-								
-								update(category, id);
-							}
+				if(!file.size) {
+
+					(function(category, id) {
+					getFileSize(filepath).then(function(size) {
+						if(size) {
+							file.size = size;
+							distro.size += file.size;
+
+							update(category, id);
 						}
 					});
-					})(category, id, file, filepath, distro);
+					}(category, id));
 				}
 				else {
 					update(category, id);
@@ -180,7 +239,22 @@ function fetchFiles() {
 	}
 }
 
-fetchFiles();
+getFilesSizes();
+
+function getFileContents(filepath) {
+	return new Promise(function(resolve, reject) {
+		$u.xhr({
+			url: filepath,
+			callback: function(xhr) {
+				if (xhr.status < 400 && xhr.responseText) {
+					resolve(xhr.responseText);
+				} else {
+					reject();
+				}
+			}
+		});
+	});
+}
 
 function prettySize(size) {
 	return Math.round(100 * size / 1024)/100 + 'KB';
@@ -201,10 +275,17 @@ function update(updatedCategory, updatedId){
 				
 				distro.paths.forEach(function(path) {
 					if (cache[path]) {
+						var file = cache[path];
+
 						var type = path.match(/\.(\w+)$/)[1],
-						    size = cache[path].size || 0;
+						    size = file.size || 0;
 						    
 						if (info.enabled) {
+
+							if (!file.contentsPromise) {
+								file.contentsPromise = getFileContents(path);
+							}
+
 							total[type] += size;
 						}
 						
@@ -239,11 +320,21 @@ function update(updatedCategory, updatedId){
 		title: prettySize(total.css)
 	});
 	
-	generateCode();
+	delayedGenerateCode();
+}
+
+var timerId = 0;
+// "debounce" multiple rapid requests to generate and highlight code
+function delayedGenerateCode(){
+	if ( timerId !== 0 ) {
+		clearTimeout(timerId);
+	}
+	timerId = setTimeout(generateCode, 500);
 }
 
 function generateCode(){
-	var code = {js: '', css: ''};
+	var promises = [];
+	var redownload = {};
 	
 	for (var category in components) {
 		var all = components[category];
@@ -254,26 +345,87 @@ function generateCode(){
 			}
 			
 			var info = all[id];
-			if (info.enabled) {
+			if (info.enabled) {						
+				if (category !== 'core') {
+					redownload[category] = redownload[category]  || [];
+					redownload[category].push(id);
+				}
 				info.files[minified? 'minified' : 'dev'].paths.forEach(function (path) {
 					if (cache[path]) {
 						var type = path.match(/\.(\w+)$/)[1];
 						
-						code[type] += cache[path].contents + (type === 'js'? ';' : '') + '\n';
+						promises.push({
+							contentsPromise: cache[path].contentsPromise,
+							path: path,
+							type: type
+						});
 					}
 				});
 			}
 		}
 	}
+
+	// Hide error message if visible
+	var error = $('#download .error');
+	error.style.display = '';
+
+	buildCode(promises).then(function(res) {
+		var code = res.code;
+		var errors = res.errors;
+
+		if(errors.length) {
+			error.style.display = 'block';
+			error.innerHTML = '';
+			$u.element.contents(error, errors);
+		}
 	
-	for (var type in code) {
-		var codeElement = $('#download-' + type + ' code');
-		
-		codeElement.textContent = code[type];
-		Prism.highlightElement(codeElement, true);
-		
-		$('#download-' + type + ' .download-button').href = 'data:application/octet-stream;charset=utf-8,' + encodeURIComponent(code[type]);
-	}
+		var redownloadUrl = window.location.href.split("?")[0] + "?";
+		for (var category in redownload) {
+			redownloadUrl += category + "=" + redownload[category].join('+') + "&";
+		}
+		redownloadUrl = "/* " + redownloadUrl.replace(/&$/,"") + " */";
+
+		for (var type in code) {
+			var codeElement = $('#download-' + type + ' code');
+			
+			codeElement.textContent = redownloadUrl + "\n" + code[type];
+			Prism.highlightElement(codeElement, true);
+			
+			$('#download-' + type + ' .download-button').href = 'data:application/octet-stream;charset=utf-8,' + encodeURIComponent(redownloadUrl + "\n" + code[type]);
+		}
+	});
+}
+
+function buildCode(promises) {
+	var i = 0,
+	    l = promises.length;
+	var code = {js: '', css: ''};
+	var errors = [];
+
+	var f = function(resolve) {
+		if(i < l) {
+			var p = promises[i];
+			p.contentsPromise.then(function(contents) {
+				code[p.type] += contents + (p.type === 'js'? ';' : '') + '\n';
+				i++;
+				f(resolve);
+			});
+			p.contentsPromise['catch'](function() {
+				errors.push($u.element.create({
+					tag: 'p',
+					prop: {
+						textContent: 'An error occurred while fetching the file "' + p.path + '".'
+					}
+				}));
+				i++;
+				f(resolve);
+			});
+		} else {
+			resolve({code: code, errors: errors});
+		}
+	};
+
+	return new Promise(f);
 }
 
 })();

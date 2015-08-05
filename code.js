@@ -71,7 +71,7 @@ $$('body > section > h1').forEach(function(h1) {
 		contents: {
 			tag: 'a',
 			properties: {
-				href: '#' + (h1.id || section.id)
+				href: window.location.pathname + '#' + (h1.id || section.id)
 			},
 			contents: text
 		},
@@ -144,7 +144,7 @@ if (current === undefined) {
 }
 
 function setTheme(id) {
-	var link = $$('link[href^="prism"]')[0];
+	var link = $$('link[href^="themes/prism"]')[0];
 
 	link.href = themes.meta.path.replace(/\{id}/g, id);
 	localStorage.setItem('theme', id);
